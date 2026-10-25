@@ -1,1 +1,709 @@
+# Создаёт проект Android, собирает llama-server и APK, публикует APK в разделе Releases
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Write project files
+        run: |
+          cat > settings.gradle << 'ENDOFFILE_0'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "LocalAI"
+          include ':app'
+          ENDOFFILE_0
+          cat > build.gradle << 'ENDOFFILE_1'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          ENDOFFILE_1
+          cat > gradle.properties << 'ENDOFFILE_2'
+          org.gradle.jvmargs=-Xmx3g
+          android.useAndroidX=false
+          ENDOFFILE_2
+          mkdir -p app
+          cat > app/build.gradle << 'ENDOFFILE_3'
+          plugins {
+              id 'com.android.application'
+          }
 
+          android {
+              namespace 'ru.localai.chat'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'ru.localai.chat'
+                  minSdk 26
+                  targetSdk 33
+                  versionCode 1
+                  versionName '1.0'
+                  ndk {
+                      abiFilters 'arm64-v8a'
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              packaging {
+                  jniLibs {
+                      useLegacyPackaging = true
+                      keepDebugSymbols.add('**/*.so')
+                  }
+              }
+          }
+          ENDOFFILE_3
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml << 'ENDOFFILE_4'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:label="Локальный ИИ"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".ServerService"
+                      android:exported="false" />
+              </application>
+          </manifest>
+          ENDOFFILE_4
+          mkdir -p app/src/main/java/ru/localai/chat
+          cat > app/src/main/java/ru/localai/chat/ServerService.java << 'ENDOFFILE_5'
+          package ru.localai.chat;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.Service;
+          import android.content.Intent;
+          import android.os.IBinder;
+
+          import java.io.File;
+          import java.io.FileWriter;
+
+          public class ServerService extends Service {
+              static final int PORT = 8765;
+              static volatile Process proc;
+              static volatile String error;
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  NotificationManager nm = getSystemService(NotificationManager.class);
+                  nm.createNotificationChannel(new NotificationChannel("ai", "Локальный ИИ", NotificationManager.IMPORTANCE_LOW));
+                  Notification n = new Notification.Builder(this, "ai")
+                          .setContentTitle("Локальный ИИ работает")
+                          .setContentText("Модель загружена в память")
+                          .setSmallIcon(android.R.drawable.ic_dialog_info)
+                          .build();
+                  startForeground(1, n);
+
+                  String model = intent == null ? null : intent.getStringExtra("model");
+                  if (model != null && (proc == null || !proc.isAlive())) {
+                      try {
+                          File exe = new File(getApplicationInfo().nativeLibraryDir, "libllama_server.so");
+                          int threads = Math.max(2, Math.min(4, Runtime.getRuntime().availableProcessors()));
+                          ProcessBuilder pb = new ProcessBuilder(
+                                  exe.getAbsolutePath(),
+                                  "-m", model,
+                                  "-c", "2048",
+                                  "-t", String.valueOf(threads),
+                                  "-np", "1",
+                                  "--host", "127.0.0.1",
+                                  "--port", String.valueOf(PORT));
+                          pb.directory(getFilesDir());
+                          pb.redirectErrorStream(true);
+                          pb.redirectOutput(new File(getFilesDir(), "server.log"));
+                          proc = pb.start();
+                      } catch (Exception e) {
+                          error = String.valueOf(e);
+                          try {
+                              FileWriter w = new FileWriter(new File(getFilesDir(), "server.log"));
+                              w.write(error);
+                              w.close();
+                          } catch (Exception ignored) {
+                          }
+                      }
+                  }
+                  return START_NOT_STICKY;
+              }
+
+              @Override
+              public void onDestroy() {
+                  Process p = proc;
+                  if (p != null) {
+                      p.destroy();
+                  }
+                  proc = null;
+                  super.onDestroy();
+              }
+          }
+          ENDOFFILE_5
+          mkdir -p app/src/main/java/ru/localai/chat
+          cat > app/src/main/java/ru/localai/chat/MainActivity.java << 'ENDOFFILE_6'
+          package ru.localai.chat;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.widget.Button;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.ProgressBar;
+          import android.widget.TextView;
+
+          import java.io.ByteArrayOutputStream;
+          import java.io.File;
+          import java.io.FileInputStream;
+          import java.io.FileOutputStream;
+          import java.io.IOException;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+
+          public class MainActivity extends Activity {
+              static final String MODEL_URL =
+                      "https://huggingface.co/bartowski/gemma-2-2b-it-GGUF/resolve/main/gemma-2-2b-it-Q4_K_M.gguf";
+              static final int PICK = 11;
+              static final long MIN_SIZE = 100000000L;
+
+              TextView status;
+              ProgressBar bar;
+              Button btnStart, btnDown, btnPick;
+              LinearLayout box;
+              WebView web;
+              File model;
+              volatile boolean busy = false;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  File dir = getExternalFilesDir(null);
+                  if (dir == null) {
+                      dir = getFilesDir();
+                  }
+                  model = new File(dir, "model.gguf");
+
+                  FrameLayout root = new FrameLayout(this);
+                  box = new LinearLayout(this);
+                  box.setOrientation(LinearLayout.VERTICAL);
+                  box.setGravity(Gravity.CENTER);
+                  int p = (int) (24 * getResources().getDisplayMetrics().density);
+                  box.setPadding(p, p, p, p);
+
+                  status = new TextView(this);
+                  status.setTextSize(18);
+                  status.setGravity(Gravity.CENTER);
+
+                  bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                  bar.setMax(1000);
+                  bar.setVisibility(View.GONE);
+
+                  btnStart = new Button(this);
+                  btnStart.setText("Запустить");
+                  btnStart.setOnClickListener(v -> startServer());
+
+                  btnDown = new Button(this);
+                  btnDown.setText("Скачать модель (1,7 ГБ)");
+                  btnDown.setOnClickListener(v -> download());
+
+                  btnPick = new Button(this);
+                  btnPick.setText("Выбрать файл модели .gguf");
+                  btnPick.setOnClickListener(v -> pick());
+
+                  box.addView(status);
+                  box.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                  box.addView(btnStart);
+                  box.addView(btnDown);
+                  box.addView(btnPick);
+
+                  web = new WebView(this);
+                  web.setVisibility(View.GONE);
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  web.addJavascriptInterface(new Bridge(), "Android");
+
+                  root.addView(box, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                  root.addView(web, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                  setContentView(root);
+
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
+                  }
+
+                  if (model.exists() && model.length() > MIN_SIZE) {
+                      startServer();
+                  } else {
+                      showSetup("Модель не найдена. Скачайте её или выберите файл .gguf.");
+                  }
+              }
+
+              class Bridge {
+                  @JavascriptInterface
+                  public void stopServer() {
+                      runOnUiThread(() -> {
+                          stopService(new Intent(MainActivity.this, ServerService.class));
+                          finishAffinity();
+                      });
+                  }
+              }
+
+              void showSetup(String msg) {
+                  box.setVisibility(View.VISIBLE);
+                  web.setVisibility(View.GONE);
+                  status.setText(msg);
+                  boolean has = model.exists() && model.length() > MIN_SIZE;
+                  btnStart.setVisibility(has ? View.VISIBLE : View.GONE);
+                  btnStart.setEnabled(true);
+                  btnDown.setEnabled(true);
+                  btnPick.setEnabled(true);
+                  bar.setVisibility(View.GONE);
+              }
+
+              void showBusy(String msg) {
+                  box.setVisibility(View.VISIBLE);
+                  web.setVisibility(View.GONE);
+                  status.setText(msg);
+                  btnStart.setEnabled(false);
+                  btnDown.setEnabled(false);
+                  btnPick.setEnabled(false);
+              }
+
+              void startServer() {
+                  showBusy("Запуск модели, подождите 1-2 минуты...");
+                  ServerService.error = null;
+                  ServerService.proc = null;
+                  Intent i = new Intent(this, ServerService.class);
+                  i.putExtra("model", model.getAbsolutePath());
+                  startForegroundService(i);
+                  new Thread(() -> {
+                      long t0 = System.currentTimeMillis();
+                      while (true) {
+                          if (ServerService.error != null) {
+                              fail(readLog());
+                              return;
+                          }
+                          Process p = ServerService.proc;
+                          if (p != null && !p.isAlive()) {
+                              fail(readLog());
+                              return;
+                          }
+                          if (healthOk()) {
+                              runOnUiThread(this::showChat);
+                              return;
+                          }
+                          if (System.currentTimeMillis() - t0 > 600000L) {
+                              fail("Время ожидания вышло.\n" + readLog());
+                              return;
+                          }
+                          try {
+                              Thread.sleep(1000);
+                          } catch (InterruptedException e) {
+                              return;
+                          }
+                      }
+                  }).start();
+              }
+
+              boolean healthOk() {
+                  try {
+                      HttpURLConnection c = (HttpURLConnection) new URL("http://127.0.0.1:" + ServerService.PORT + "/health").openConnection();
+                      c.setConnectTimeout(1000);
+                      c.setReadTimeout(1000);
+                      int code = c.getResponseCode();
+                      c.disconnect();
+                      return code == 200;
+                  } catch (Exception e) {
+                      return false;
+                  }
+              }
+
+              String readLog() {
+                  try {
+                      File f = new File(getFilesDir(), "server.log");
+                      ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                      InputStream in = new FileInputStream(f);
+                      byte[] buf = new byte[8192];
+                      int n;
+                      while ((n = in.read(buf)) > 0) {
+                          bo.write(buf, 0, n);
+                      }
+                      in.close();
+                      String s = bo.toString("UTF-8");
+                      return s.length() > 1500 ? s.substring(s.length() - 1500) : s;
+                  } catch (Exception e) {
+                      return "Журнал недоступен";
+                  }
+              }
+
+              void fail(String msg) {
+                  runOnUiThread(() -> showSetup("Ошибка запуска:\n" + msg));
+              }
+
+              void showChat() {
+                  try {
+                      InputStream in = getAssets().open("chat.html");
+                      ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                      byte[] buf = new byte[8192];
+                      int n;
+                      while ((n = in.read(buf)) > 0) {
+                          bo.write(buf, 0, n);
+                      }
+                      in.close();
+                      String html = bo.toString("UTF-8");
+                      box.setVisibility(View.GONE);
+                      web.setVisibility(View.VISIBLE);
+                      web.loadDataWithBaseURL("http://127.0.0.1:" + ServerService.PORT + "/", html, "text/html", "utf-8", null);
+                  } catch (Exception e) {
+                      showSetup("Ошибка страницы чата: " + e);
+                  }
+              }
+
+              void download() {
+                  if (busy) {
+                      return;
+                  }
+                  busy = true;
+                  showBusy("Подключение...");
+                  bar.setVisibility(View.VISIBLE);
+                  bar.setProgress(0);
+                  new Thread(() -> {
+                      File part = new File(model.getParentFile(), "model.gguf.part");
+                      try {
+                          long have = part.exists() ? part.length() : 0;
+                          HttpURLConnection c = (HttpURLConnection) new URL(MODEL_URL).openConnection();
+                          c.setConnectTimeout(30000);
+                          c.setReadTimeout(60000);
+                          c.setInstanceFollowRedirects(true);
+                          if (have > 0) {
+                              c.setRequestProperty("Range", "bytes=" + have + "-");
+                          }
+                          int code = c.getResponseCode();
+                          if (code != 200 && code != 206) {
+                              throw new IOException("HTTP " + code);
+                          }
+                          boolean append = code == 206;
+                          long base = append ? have : 0;
+                          long total = c.getContentLengthLong() + base;
+                          InputStream in = c.getInputStream();
+                          OutputStream out = new FileOutputStream(part, append);
+                          byte[] buf = new byte[262144];
+                          long done = base;
+                          long last = 0;
+                          int n;
+                          while ((n = in.read(buf)) > 0) {
+                              out.write(buf, 0, n);
+                              done += n;
+                              long now = System.currentTimeMillis();
+                              if (now - last > 500) {
+                                  last = now;
+                                  final long d = done;
+                                  final long t = total;
+                                  runOnUiThread(() -> {
+                                      status.setText("Скачано " + (d / 1048576) + " МБ из " + (t / 1048576) + " МБ");
+                                      if (t > 0) {
+                                          bar.setProgress((int) (d * 1000 / t));
+                                      }
+                                  });
+                              }
+                          }
+                          out.close();
+                          in.close();
+                          if (model.exists()) {
+                              model.delete();
+                          }
+                          if (!part.renameTo(model)) {
+                              throw new IOException("Не удалось сохранить файл модели");
+                          }
+                          busy = false;
+                          runOnUiThread(this::startServer);
+                      } catch (Exception e) {
+                          busy = false;
+                          final String m = String.valueOf(e.getMessage());
+                          runOnUiThread(() -> showSetup("Ошибка загрузки: " + m + "\nНажмите «Скачать» ещё раз, загрузка продолжится."));
+                      }
+                  }).start();
+              }
+
+              void pick() {
+                  Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                  i.addCategory(Intent.CATEGORY_OPENABLE);
+                  i.setType("*/*");
+                  startActivityForResult(i, PICK);
+              }
+
+              @Override
+              protected void onActivityResult(int req, int res, Intent data) {
+                  super.onActivityResult(req, res, data);
+                  if (req == PICK && res == RESULT_OK && data != null && data.getData() != null) {
+                      copyModel(data.getData());
+                  }
+              }
+
+              void copyModel(Uri uri) {
+                  if (busy) {
+                      return;
+                  }
+                  busy = true;
+                  showBusy("Копирование файла...");
+                  new Thread(() -> {
+                      File part = new File(model.getParentFile(), "model.gguf.part");
+                      try {
+                          InputStream in = getContentResolver().openInputStream(uri);
+                          OutputStream out = new FileOutputStream(part, false);
+                          byte[] buf = new byte[262144];
+                          long done = 0;
+                          long last = 0;
+                          int n;
+                          while ((n = in.read(buf)) > 0) {
+                              out.write(buf, 0, n);
+                              done += n;
+                              long now = System.currentTimeMillis();
+                              if (now - last > 500) {
+                                  last = now;
+                                  final long d = done;
+                                  runOnUiThread(() -> status.setText("Скопировано " + (d / 1048576) + " МБ"));
+                              }
+                          }
+                          out.close();
+                          in.close();
+                          if (model.exists()) {
+                              model.delete();
+                          }
+                          if (!part.renameTo(model)) {
+                              throw new IOException("Не удалось сохранить файл модели");
+                          }
+                          busy = false;
+                          runOnUiThread(this::startServer);
+                      } catch (Exception e) {
+                          busy = false;
+                          final String m = String.valueOf(e.getMessage());
+                          runOnUiThread(() -> showSetup("Ошибка копирования: " + m));
+                      }
+                  }).start();
+              }
+          }
+          ENDOFFILE_6
+          mkdir -p app/src/main/assets
+          cat > app/src/main/assets/chat.html << 'ENDOFFILE_7'
+          <!doctype html>
+          <html lang="ru">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Локальный ИИ</title>
+          <style>
+          * { box-sizing: border-box; }
+          html, body { height: 100%; margin: 0; }
+          body { display: flex; flex-direction: column; font: 16px/1.45 sans-serif; background: #111; color: #eee; }
+          header { display: flex; gap: 8px; padding: 8px; background: #1c1c1c; align-items: center; }
+          header b { flex: 1; }
+          button { font: inherit; padding: 8px 12px; border: 0; border-radius: 8px; background: #333; color: #eee; }
+          #log { flex: 1; overflow-y: auto; padding: 10px; }
+          .m { margin: 8px 0; padding: 10px 12px; border-radius: 12px; white-space: pre-wrap; word-wrap: break-word; max-width: 95%; }
+          .u { background: #1f4e79; margin-left: auto; width: fit-content; }
+          .a { background: #2a2a2a; }
+          footer { display: flex; gap: 8px; padding: 8px; background: #1c1c1c; }
+          textarea { flex: 1; font: inherit; padding: 8px; border-radius: 8px; border: 0; background: #2a2a2a; color: #eee; resize: none; height: 56px; }
+          #send { background: #2e7d32; }
+          </style>
+          </head>
+          <body>
+          <header>
+            <b>Локальный ИИ</b>
+            <button id="clear">Очистить</button>
+            <button id="stop">Стоп</button>
+            <button id="quit">Выход</button>
+          </header>
+          <div id="log"></div>
+          <footer>
+            <textarea id="inp" placeholder="Вопрос. Начните с «д » для ответа с проверкой"></textarea>
+            <button id="send">Отправить</button>
+          </footer>
+          <script>
+          var RULE = "Ты умный помощник, который отвечает как сильный чат с искусственным интеллектом. Пиши на правильном литературном русском языке, развёрнуто, точными словами и терминами, с примерами и объяснениями. Никогда не задавай уточняющих вопросов и не повторяй вопрос. Если данных не хватает, прими разумное допущение, коротко назови его и дай ответ. Задачи решай по шагам и в конце напиши: Ответ: и результат. Если просят придумать, написать или объяснить, сделай это сразу.";
+          var hist = [];
+          var ctrl = null;
+          var logEl = document.getElementById('log');
+          var inp = document.getElementById('inp');
+
+          function add(cls, text) {
+            var d = document.createElement('div');
+            d.className = 'm ' + cls;
+            d.textContent = text;
+            logEl.appendChild(d);
+            logEl.scrollTop = logEl.scrollHeight;
+            return d;
+          }
+
+          function clean(t) {
+            return t.replace(/<think>[\s\S]*?<\/think>/g, '').replace(/<think>[\s\S]*$/, '').trim();
+          }
+
+          async function stream(msgs, max, onText, signal) {
+            var r = await fetch('/v1/chat/completions', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ messages: msgs, max_tokens: max, temperature: 0.5, top_p: 0.9, repeat_penalty: 1.1, stream: true }),
+              signal: signal
+            });
+            if (!r.ok) { throw new Error('HTTP ' + r.status); }
+            var reader = r.body.getReader();
+            var dec = new TextDecoder();
+            var buf = '';
+            var full = '';
+            while (true) {
+              var chunk = await reader.read();
+              if (chunk.done) { break; }
+              buf += dec.decode(chunk.value, { stream: true });
+              var i;
+              while ((i = buf.indexOf('\n')) >= 0) {
+                var line = buf.slice(0, i).trim();
+                buf = buf.slice(i + 1);
+                if (line.indexOf('data:') !== 0) { continue; }
+                var d = line.slice(5).trim();
+                if (d === '[DONE]') { continue; }
+                try {
+                  var j = JSON.parse(d);
+                  var t = j.choices[0].delta && j.choices[0].delta.content;
+                  if (t) { full += t; onText(full); }
+                } catch (e) { }
+              }
+            }
+            return full;
+          }
+
+          async function send() {
+            var q = inp.value.trim();
+            if (!q || ctrl) { return; }
+            inp.value = '';
+            if (q === '/clear') { hist = []; logEl.innerHTML = ''; return; }
+            if (q === '/exit') { Android.stopServer(); return; }
+            add('u', q);
+            if (/^н\s/i.test(q)) {
+              add('a', 'База новостей пока не подключена в приложении.');
+              return;
+            }
+            var deep = /^д\s/i.test(q);
+            if (deep) { q = q.slice(2).trim(); }
+            var out = add('a', '...');
+            ctrl = new AbortController();
+            try {
+              var msgs = hist.slice(-4).concat([{ role: 'user', content: RULE + '\n\nВопрос: ' + q }]);
+              var ans = await stream(msgs, 700, function (t) {
+                out.textContent = clean(t) || '...';
+                logEl.scrollTop = logEl.scrollHeight;
+              }, ctrl.signal);
+              ans = clean(ans);
+              if (deep) {
+                out.textContent = 'Проверяю ответ...';
+                var chk = 'Вопрос: ' + q + '\n\nЧерновик ответа:\n' + ans + '\n\nПроверь черновик на ошибки и логику. Исправь их и улучши язык. Напиши только итоговый ответ на русском языке, без слов о проверке.';
+                ans = clean(await stream([{ role: 'user', content: chk }], 700, function (t) {
+                  out.textContent = clean(t) || 'Проверяю ответ...';
+                  logEl.scrollTop = logEl.scrollHeight;
+                }, ctrl.signal));
+              }
+              hist.push({ role: 'user', content: q }, { role: 'assistant', content: ans });
+            } catch (e) {
+              if (e.name === 'AbortError') { out.textContent += '\n[остановлено]'; }
+              else { out.textContent = 'Ошибка: ' + e.message; }
+            }
+            ctrl = null;
+          }
+
+          document.getElementById('send').onclick = send;
+          document.getElementById('stop').onclick = function () { if (ctrl) { ctrl.abort(); } };
+          document.getElementById('clear').onclick = function () { hist = []; logEl.innerHTML = ''; };
+          document.getElementById('quit').onclick = function () { Android.stopServer(); };
+          </script>
+          </body>
+          </html>
+          ENDOFFILE_7
+      - name: Build llama-server for Android
+        run: |
+          NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp
+          cmake -S llama.cpp -B build-android \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-28 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-march=armv8.2-a+dotprod" \
+            -DCMAKE_CXX_FLAGS="-march=armv8.2-a+dotprod" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_NATIVE=OFF \
+            -DGGML_OPENMP=OFF \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_TOOLS=ON \
+            -DLLAMA_BUILD_SERVER=ON
+          cmake --build build-android --target llama-server -j4
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          cp build-android/bin/llama-server app/src/main/jniLibs/arm64-v8a/libllama_server.so
+          ls -l app/src/main/jniLibs/arm64-v8a
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+      - name: Publish APK in Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk LocalAI.apk
+          gh release create "v${{ github.run_number }}" LocalAI.apk --title "Local AI v${{ github.run_number }}" --notes "Установочный файл LocalAI.apk"

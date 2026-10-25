@@ -150,7 +150,9 @@ jobs:
                           ProcessBuilder pb = new ProcessBuilder(
                                   exe.getAbsolutePath(),
                                   "-m", model,
-                                  "-c", "3072",
+                                  "-c", "2048",
+                                  "-b", "256",
+                                  "-ub", "128",
                                   "-t", String.valueOf(threads),
                                   "-np", "1",
                                   "--host", "127.0.0.1",
@@ -222,7 +224,9 @@ jobs:
 
               TextView status;
               ProgressBar bar;
-              Button btnStart, btnDown, btnPick;
+              Button btnStart, btnDown, btnLight, btnPick;
+              static final String LIGHT_URL =
+                      "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf";
               LinearLayout box;
               WebView web;
               File model;
@@ -259,8 +263,12 @@ jobs:
                   btnStart.setOnClickListener(v -> openChat());
 
                   btnDown = new Button(this);
-                  btnDown.setText("Скачать модель (1,7 ГБ)");
-                  btnDown.setOnClickListener(v -> download());
+                  btnDown.setText("Скачать Gemma 2 (1,7 ГБ, умнее)");
+                  btnDown.setOnClickListener(v -> download(MODEL_URL));
+
+                  btnLight = new Button(this);
+                  btnLight.setText("Скачать лёгкую модель Qwen 1,5B (1,1 ГБ, быстрее)");
+                  btnLight.setOnClickListener(v -> download(LIGHT_URL));
 
                   btnPick = new Button(this);
                   btnPick.setText("Выбрать файл модели .gguf");
@@ -270,6 +278,7 @@ jobs:
                   box.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
                   box.addView(btnStart);
                   box.addView(btnDown);
+                  box.addView(btnLight);
                   box.addView(btnPick);
 
                   web = new WebView(this);
@@ -317,6 +326,16 @@ jobs:
                           return "error:" + readLog();
                       }
                       return "loading";
+                  }
+
+                  @JavascriptInterface
+                  public void killServer() {
+                      Process p = ServerService.proc;
+                      if (p != null) {
+                          p.destroy();
+                      }
+                      ServerService.proc = null;
+                      ServerService.error = null;
                   }
 
                   @JavascriptInterface
@@ -374,6 +393,7 @@ jobs:
                   btnStart.setVisibility(hasModel() ? View.VISIBLE : View.GONE);
                   btnStart.setEnabled(true);
                   btnDown.setEnabled(true);
+                  btnLight.setEnabled(true);
                   btnPick.setEnabled(true);
                   bar.setVisibility(View.GONE);
               }
@@ -384,6 +404,7 @@ jobs:
                   status.setText(msg);
                   btnStart.setEnabled(false);
                   btnDown.setEnabled(false);
+                  btnLight.setEnabled(false);
                   btnPick.setEnabled(false);
               }
 
@@ -433,7 +454,7 @@ jobs:
                   }
               }
 
-              void download() {
+              void download(final String url) {
                   if (busy) {
                       return;
                   }
@@ -443,9 +464,17 @@ jobs:
                   bar.setProgress(0);
                   new Thread(() -> {
                       File part = new File(model.getParentFile(), "model.gguf.part");
+                      File mark = new File(model.getParentFile(), "model.gguf.url");
                       try {
+                          String prev = mark.exists() ? readAll(new FileInputStream(mark)) : "";
+                          if (!prev.equals(url) && part.exists()) {
+                              part.delete();
+                          }
+                          FileOutputStream mo = new FileOutputStream(mark, false);
+                          mo.write(url.getBytes("UTF-8"));
+                          mo.close();
                           long have = part.exists() ? part.length() : 0;
-                          HttpURLConnection c = (HttpURLConnection) new URL(MODEL_URL).openConnection();
+                          HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
                           c.setConnectTimeout(30000);
                           c.setReadTimeout(60000);
                           c.setInstanceFollowRedirects(true);
@@ -570,8 +599,8 @@ jobs:
           * { box-sizing: border-box; }
           html, body { height: 100%; margin: 0; }
           body { display: flex; flex-direction: column; font: 16px/1.45 sans-serif; background: #111; color: #eee; }
-          header { display: flex; gap: 6px; padding: 8px; background: #1c1c1c; align-items: center; flex-wrap: wrap; }
-          header b { flex: 1; min-width: 90px; }
+          header { display: flex; gap: 6px; padding: 8px; background: #1c1c1c; align-items: center; }
+          header b { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
           button { font: inherit; padding: 8px 10px; border: 0; border-radius: 8px; background: #333; color: #eee; }
           #st { padding: 4px 10px; font-size: 14px; background: #1c1c1c; color: #ffb74d; }
           #st.ok { color: #81c784; }
@@ -583,15 +612,22 @@ jobs:
           footer { display: flex; gap: 8px; padding: 8px; background: #1c1c1c; }
           textarea { flex: 1; font: inherit; padding: 8px; border-radius: 8px; border: 0; background: #2a2a2a; color: #eee; resize: none; height: 56px; }
           #send { background: #2e7d32; }
+          #ov { display: none; position: fixed; inset: 0; background: #111; z-index: 5; flex-direction: column; }
+          #ov.on { display: flex; }
+          #list { flex: 1; overflow-y: auto; padding: 8px; }
+          .row { display: flex; gap: 6px; margin: 6px 0; }
+          .row .t { flex: 1; text-align: left; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; background: #2a2a2a; }
+          .row .t.cur { background: #1f4e79; }
+          .row .x { background: #5a2a2a; }
+          .bar { display: flex; gap: 8px; padding: 8px; background: #1c1c1c; flex-wrap: wrap; }
           </style>
           </head>
           <body>
           <header>
-            <b>Локальный ИИ</b>
-            <button id="clear">Очистить</button>
+            <button id="chats">Чаты</button>
+            <b id="title">Новый чат</b>
+            <button id="new">+</button>
             <button id="stop">Стоп</button>
-            <button id="model">Модель</button>
-            <button id="quit">Выход</button>
           </header>
           <div id="st">Модель загружается...</div>
           <div id="log"></div>
@@ -599,10 +635,23 @@ jobs:
             <textarea id="inp" placeholder="Вопрос. Начните с «д » для ответа с проверкой"></textarea>
             <button id="send">Отправить</button>
           </footer>
+          <div id="ov">
+            <div class="bar">
+              <button id="back">Назад</button>
+              <button id="new2">Новый чат</button>
+            </div>
+            <div id="list"></div>
+            <div class="bar">
+              <button id="clearall">Удалить все чаты</button>
+              <button id="model">Сменить модель</button>
+              <button id="restart">Перезапустить модель</button>
+              <button id="quit">Выход</button>
+            </div>
+          </div>
           <script>
-          var RULE = "Ты умный помощник, который отвечает как сильный чат с искусственным интеллектом. Пиши на правильном литературном русском языке, развёрнуто, точными словами и терминами, с примерами и объяснениями. Никогда не задавай уточняющих вопросов и не повторяй вопрос. Если данных не хватает, прими разумное допущение, коротко назови его и дай ответ. Задачи решай по шагам и в конце напиши: Ответ: и результат. Если просят придумать, написать или объяснить, сделай это сразу.";
-          var MAXCHARS = 3500;
-          var hist = [];
+          var RULE = "Ты умный помощник. Отвечай на правильном русском языке, по существу и понятно, с примерами. Не задавай уточняющих вопросов и не повторяй вопрос. Если данных не хватает, прими разумное допущение и назови его. Задачи решай по шагам и в конце напиши: Ответ: и результат.";
+          var MAXCHARS = 2200;
+          var data = { cur: null, chats: [] };
           var ctrl = null;
           var ready = false;
           var logEl = document.getElementById('log');
@@ -610,6 +659,39 @@ jobs:
           var st = document.getElementById('st');
           var t0 = Date.now();
 
+          function uid() { return 'c' + Date.now().toString(36) + Math.floor(Math.random() * 1000); }
+          function cur() {
+            for (var i = 0; i < data.chats.length; i++) { if (data.chats[i].id === data.cur) { return data.chats[i]; } }
+            return null;
+          }
+          function save() {
+            try { Android.saveHistory(JSON.stringify(data)); } catch (e) { }
+          }
+          function load() {
+            var raw = [];
+            try { raw = JSON.parse(Android.loadHistory() || '[]'); } catch (e) { raw = []; }
+            if (Array.isArray(raw)) {
+              data = { cur: null, chats: [] };
+              if (raw.length) {
+                data.chats.push({ id: uid(), title: String(raw[0].content).slice(0, 30), msgs: raw, ts: Date.now() });
+              }
+            } else if (raw && raw.chats) {
+              data = raw;
+            }
+            if (!data.chats.length) { newChat(); }
+            else if (!cur()) { data.cur = data.chats[0].id; }
+            render();
+          }
+          function newChat() {
+            var c = cur();
+            if (c && c.msgs.length === 0) { render(); return; }
+            c = { id: uid(), title: '', msgs: [], ts: Date.now() };
+            data.chats.unshift(c);
+            data.cur = c.id;
+            save();
+            render();
+          }
+          function abortGen() { if (ctrl) { ctrl.abort(); } }
           function add(cls, text) {
             var d = document.createElement('div');
             d.className = 'm ' + cls;
@@ -618,35 +700,60 @@ jobs:
             logEl.scrollTop = logEl.scrollHeight;
             return d;
           }
-
-          function save() {
-            try { Android.saveHistory(JSON.stringify(hist.slice(-60))); } catch (e) { }
-          }
-
-          function load() {
-            try {
-              hist = JSON.parse(Android.loadHistory() || '[]');
-            } catch (e) { hist = []; }
-            for (var i = 0; i < hist.length; i++) {
-              add(hist[i].role === 'user' ? 'u' : 'a', hist[i].content);
+          function render() {
+            var c = cur();
+            logEl.innerHTML = '';
+            document.getElementById('title').textContent = c && c.title ? c.title : 'Новый чат';
+            if (c) {
+              for (var i = 0; i < c.msgs.length; i++) {
+                add(c.msgs[i].role === 'user' ? 'u' : 'a', c.msgs[i].content);
+              }
             }
           }
+          function renderList() {
+            var l = document.getElementById('list');
+            l.innerHTML = '';
+            data.chats.forEach(function (c) {
+              var r = document.createElement('div');
+              r.className = 'row';
+              var b = document.createElement('button');
+              b.className = 't' + (c.id === data.cur ? ' cur' : '');
+              b.textContent = (c.title || 'Новый чат') + ' (' + Math.floor(c.msgs.length / 2) + ')';
+              b.onclick = function () { abortGen(); data.cur = c.id; save(); render(); closeOv(); };
+              var x = document.createElement('button');
+              x.className = 'x';
+              x.textContent = 'Удалить';
+              x.onclick = function () {
+                if (!confirm('Удалить этот чат?')) { return; }
+                abortGen();
+                data.chats = data.chats.filter(function (z) { return z.id !== c.id; });
+                if (!data.chats.length) { data.cur = null; newChat(); }
+                else if (!cur()) { data.cur = data.chats[0].id; }
+                save(); render(); renderList();
+              };
+              r.appendChild(b);
+              r.appendChild(x);
+              l.appendChild(r);
+            });
+          }
+          function openOv() { renderList(); document.getElementById('ov').className = 'on'; }
+          function closeOv() { document.getElementById('ov').className = ''; }
 
-          function recent() {
+          function recent(c) {
             var out = [];
             var n = 0;
-            for (var i = hist.length - 1; i >= 0; i--) {
-              n += hist[i].content.length;
-              if (n > MAXCHARS || out.length >= 8) { break; }
-              out.unshift(hist[i]);
+            for (var i = c.msgs.length - 1; i >= 0; i--) {
+              n += c.msgs[i].content.length;
+              if (n > MAXCHARS || out.length >= 6) { break; }
+              out.unshift(c.msgs[i]);
             }
             while (out.length && out[0].role !== 'user') { out.shift(); }
             return out;
           }
-
           function clean(t) {
             return t.replace(/<think>[\s\S]*?<\/think>/g, '').replace(/<think>[\s\S]*$/, '').trim();
           }
+          function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
           async function poll() {
             while (!ready) {
@@ -664,20 +771,17 @@ jobs:
               try { s = Android.status(); } catch (e) { }
               if (s.indexOf('error:') === 0) {
                 st.className = 'err';
-                st.textContent = 'Ошибка запуска модели:\n' + s.slice(6) + '\nНажмите «Модель», чтобы выбрать другую.';
+                st.textContent = 'Ошибка запуска модели:\n' + s.slice(6) + '\nОткройте «Чаты» и нажмите «Сменить модель».';
                 try { Android.restart(); } catch (e) { }
-                await new Promise(function (r) { setTimeout(r, 15000); });
+                await sleep(15000);
               } else {
                 st.className = '';
                 st.textContent = 'Модель загружается... ' + Math.round((Date.now() - t0) / 1000) + ' с. Можно писать вопрос, ответ придёт после загрузки.';
-                await new Promise(function (r) { setTimeout(r, 1000); });
+                await sleep(1000);
               }
             }
           }
-
-          async function waitReady() {
-            while (!ready) { await new Promise(function (r) { setTimeout(r, 500); }); }
-          }
+          async function waitReady() { while (!ready) { await sleep(500); } }
 
           async function stream(msgs, max, onText, signal) {
             var r = await fetch('/v1/chat/completions', {
@@ -692,7 +796,10 @@ jobs:
             var buf = '';
             var full = '';
             while (true) {
-              var chunk = await reader.read();
+              var timer;
+              var guard = new Promise(function (_, rej) { timer = setTimeout(function () { rej(new Error('нет ответа 3 минуты')); }, 180000); });
+              var chunk;
+              try { chunk = await Promise.race([reader.read(), guard]); } finally { clearTimeout(timer); }
               if (chunk.done) { break; }
               buf += dec.decode(chunk.value, { stream: true });
               var i;
@@ -715,44 +822,61 @@ jobs:
           async function send() {
             var q = inp.value.trim();
             if (!q || ctrl) { return; }
+            var c = cur();
+            if (q === '/clear') { inp.value = ''; c.msgs = []; save(); render(); return; }
             inp.value = '';
-            if (q === '/clear') { hist = []; logEl.innerHTML = ''; save(); return; }
-            if (q === '/exit') { Android.stopServer(); return; }
             var deep = /^д\s/i.test(q);
             if (deep) { q = q.slice(2).trim(); }
             add('u', q);
             var out = add('a', ready ? '...' : 'Ожидаю загрузки модели...');
             ctrl = new AbortController();
+            var ans = '';
             try {
               await waitReady();
               out.textContent = '...';
-              var msgs = recent().concat([{ role: 'user', content: RULE + '\n\nВопрос: ' + q }]);
-              var ans = await stream(msgs, 700, function (t) {
+              var msgs = recent(c).concat([{ role: 'user', content: RULE + '\n\nВопрос: ' + q }]);
+              ans = clean(await stream(msgs, 500, function (t) {
                 out.textContent = clean(t) || '...';
                 logEl.scrollTop = logEl.scrollHeight;
-              }, ctrl.signal);
-              ans = clean(ans);
+              }, ctrl.signal));
               if (deep) {
                 out.textContent = 'Проверяю ответ...';
                 var chk = 'Вопрос: ' + q + '\n\nЧерновик ответа:\n' + ans + '\n\nПроверь черновик на ошибки и логику. Исправь их и улучши язык. Напиши только итоговый ответ на русском языке, без слов о проверке.';
-                ans = clean(await stream([{ role: 'user', content: chk }], 700, function (t) {
+                ans = clean(await stream([{ role: 'user', content: chk }], 500, function (t) {
                   out.textContent = clean(t) || 'Проверяю ответ...';
                   logEl.scrollTop = logEl.scrollHeight;
                 }, ctrl.signal));
               }
-              hist.push({ role: 'user', content: q }, { role: 'assistant', content: ans });
+              c.msgs.push({ role: 'user', content: q }, { role: 'assistant', content: ans });
+              if (!c.title) { c.title = q.slice(0, 30); document.getElementById('title').textContent = c.title; }
+              c.ts = Date.now();
               save();
             } catch (e) {
-              if (e.name === 'AbortError') { out.textContent += '\n[остановлено]'; }
-              else { out.textContent = 'Ошибка: ' + e.message; }
+              if (e.name === 'AbortError') {
+                out.textContent = (ans ? ans + '\n' : '') + '[остановлено]';
+              } else {
+                out.textContent = 'Ошибка: ' + e.message + '\nНажмите «Чаты», затем «Перезапустить модель».';
+              }
             }
             ctrl = null;
           }
 
           document.getElementById('send').onclick = send;
-          document.getElementById('stop').onclick = function () { if (ctrl) { ctrl.abort(); } };
-          document.getElementById('clear').onclick = function () { hist = []; logEl.innerHTML = ''; save(); };
+          document.getElementById('stop').onclick = abortGen;
+          document.getElementById('new').onclick = function () { abortGen(); newChat(); };
+          document.getElementById('new2').onclick = function () { abortGen(); newChat(); closeOv(); };
+          document.getElementById('chats').onclick = openOv;
+          document.getElementById('back').onclick = closeOv;
+          document.getElementById('clearall').onclick = function () {
+            if (!confirm('Удалить все чаты?')) { return; }
+            abortGen(); data = { cur: null, chats: [] }; newChat(); renderList();
+          };
           document.getElementById('model').onclick = function () { Android.changeModel(); };
+          document.getElementById('restart').onclick = function () {
+            abortGen(); ready = false; t0 = Date.now(); st.style.display = 'block'; st.className = '';
+            try { Android.killServer(); Android.restart(); } catch (e) { }
+            poll(); closeOv();
+          };
           document.getElementById('quit').onclick = function () { Android.stopServer(); };
           load();
           poll();
